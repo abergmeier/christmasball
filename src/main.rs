@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, Arc};
 
 use anyhow::{Ok, Result};
 use colors_transform::{Color, Rgb};
@@ -22,12 +22,14 @@ use crate::rgb_led::WS2812RMT;
 mod rgb_led;
 
 const SSID: &str = "lunas-christmas";
+static WIFI: Mutex<Option<BlockingWifi<&mut EspWifi>>> = Mutex::new(None);
+static ESP_WIFI: Mutex<Option<EspWifi>> = Mutex::new(None);
 
 fn main() -> Result<()> {
     esp_idf_sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    let led_color_mutex = Mutex::new(Rgb::from(0.5, 0.5, 0.5));
+    let led_color_mutex = Arc::new(Mutex::new(Rgb::from(0.5, 0.5, 0.5)));
 
     let peripherals = Peripherals::take().unwrap();
 
@@ -59,21 +61,22 @@ fn main() -> Result<()> {
 
     let nvs = EspDefaultNvsPartition::take()?;
 
-    // TODO: Clarify why it is ok to clone here
-    let mut esp_wifi = EspWifi::new(peripherals.modem, sysloop.clone(), Some(nvs))?;
-
-    let mut wifi = BlockingWifi::wrap(&mut esp_wifi, sysloop)?;
-    wifi.set_configuration(&Configuration::AccessPoint(
-        esp_idf_svc::wifi::AccessPointConfiguration {
-            ssid: SSID.into(),
-            password: "".into(),
-            ..Default::default()
-        },
-    ))?;
-    wifi.start()?;
-    wifi.wait_netif_up()?;
-    core::mem::forget(wifi);
-    core::mem::forget(esp_wifi);
+    let mut wifi = WIFI.lock()?;
+    *wifi = Some({
+        // TODO: Clarify why it is ok to clone here
+        let mut esp_wifi = EspWifi::new(peripherals.modem, sysloop.clone(), Some(nvs))?;
+        let mut wifi = BlockingWifi::wrap(&mut esp_wifi, sysloop)?;
+        wifi.set_configuration(&Configuration::AccessPoint(
+            esp_idf_svc::wifi::AccessPointConfiguration {
+                ssid: SSID.into(),
+                password: "".into(),
+                ..Default::default()
+            },
+        ))?;
+        wifi.start()?;
+        wifi.wait_netif_up()?;
+        wifi
+    });
 
     let mut srv = EspHttpServer::new(&Default::default())?;
     srv.fn_handler("/", Method::Get, |req| {
